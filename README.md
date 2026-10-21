@@ -18,7 +18,7 @@ Private-use Kotlin Android TV / Google TV application shell for [fal.ai](https:/
 
 ## Status
 
-Initial **unverified** Android project scaffold with a full-screen WebView and minimal menu. Authentication, session persistence, remote-control navigation, and real device compatibility have **not yet been tested**. Focus and cursor UX remain to be implemented and validated.
+A **smoke-tested** Kotlin Android TV APK builds, installs, and renders fal.ai in the headed Google TV emulator. Cursor movement, changing to focus mode, DOM element focus, and a remotely accessible navigation menu have been observed. **Google OAuth and persistent fal sessions, actual webpage click behavior, keyboard input, and Sony hardware compatibility remain unverified.** See [docs/QA_2026-10-21.md](docs/QA_2026-10-21.md) and [docs/PRODUCT_AND_QA.md](docs/PRODUCT_AND_QA.md).
 
 ## Toolchain
 
