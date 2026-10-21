@@ -13,6 +13,12 @@ class CursorOverlay(context: Context) : View(context) {
     var cursorY = 0f
         private set
 
+    var scrollMode = false
+        set(value) {
+            field = value
+            invalidate()
+        }
+
     private val border = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.BLACK
         strokeWidth = 6f * resources.displayMetrics.density
@@ -22,6 +28,16 @@ class CursorOverlay(context: Context) : View(context) {
         color = Color.rgb(32, 221, 242)
         strokeWidth = 3f * resources.displayMetrics.density
         style = Paint.Style.STROKE
+    }
+    private val labelBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.BLACK
+        style = Paint.Style.FILL
+    }
+    private val labelFg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(32, 221, 242)
+        style = Paint.Style.FILL
+        textSize = 15f * resources.displayMetrics.density
+        isFakeBoldText = true
     }
 
     init {
@@ -57,5 +73,13 @@ class CursorOverlay(context: Context) : View(context) {
         canvas.drawLine(cursorX, cursorY - 23f * d, cursorX, cursorY - 8f * d, pointer)
         canvas.drawLine(cursorX, cursorY + 8f * d, cursorX, cursorY + 23f * d, pointer)
         canvas.drawCircle(cursorX, cursorY, 2f * d, pointer)
+        if (scrollMode) {
+            val title = "SCROLL"
+            val left = (cursorX + 26f * d).coerceIn(2f * d, (width - 100f * d).coerceAtLeast(2f * d))
+            val top = (cursorY - 12f * d).coerceIn(2f * d, (height - 27f * d).coerceAtLeast(2f * d))
+            val right = left + labelFg.measureText(title) + 14f * d
+            canvas.drawRoundRect(left, top, right, top + 26f * d, 7f * d, 7f * d, labelBg)
+            canvas.drawText(title, left + 7f * d, top + 18f * d, labelFg)
+        }
     }
 }

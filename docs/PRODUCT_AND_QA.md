@@ -48,7 +48,7 @@ AI-TV is a small, private-use Android TV application that displays **fal.ai** wi
 | D | User can sign in and fal account is usable | **Requires user login; untested** |
 | E | Login survives app kill/relaunch and emulator cold boot | Not yet tested |
 | F | D-pad focus mode highlights/activates controls | **DOM focus movement verified; activation untested** |
-| G | D-pad cursor mode moves/clicks and scrolls | **Pointer movement verified; clicking and scrolling untested** |
+| G | D-pad cursor mode moves/clicks and scrolls | **Pointer movement verified; dedicated scroll code built/unit-tested, device scrolling and clicking untested** |
 | H | Back/Forward/Refresh/Home actions and keyboard work | **Menu opens; individual actions and keyboard untested** |
 | I | Physical Sony TV keyboard/navigation tested | Device unavailable; later |
 | J | Voice dictation integrated | Deferred until after other TV testing |

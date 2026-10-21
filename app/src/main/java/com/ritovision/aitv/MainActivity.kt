@@ -14,6 +14,8 @@ import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceError
 import android.widget.FrameLayout
 import android.widget.Toast
 
@@ -22,12 +24,16 @@ import android.widget.Toast
  * No webpage credentials are inspected or copied.
  */
 class MainActivity : Activity() {
-    private enum class Mode { CURSOR, FOCUS }
+    private enum class Mode { CURSOR, SCROLL, FOCUS }
     private var mode = Mode.CURSOR
     private lateinit var browser: WebView
     private lateinit var cursor: CursorOverlay
     private var selectLongHandled = false
     private var backLongHandled = false
+    private var signInErrorDialogOpen = false
+    private val scrollScript: String by lazy {
+        assets.open("tv-scroll.js").bufferedReader().use { it.readText() }
+    }
     private val focusScript: String by lazy {
         assets.open("tv-focus.js").bufferedReader().use { it.readText() }
     }
@@ -63,6 +69,27 @@ class MainActivity : Activity() {
                         view.evaluateJavascript(focusScript, null)
                     }
                 }
+
+                override fun onReceivedError(
+                    view: WebView,
+                    request: WebResourceRequest,
+                    error: WebResourceError
+                ) {
+                    super.onReceivedError(view, request, error)
+                    if (!request.isForMainFrame) return
+                    // Only offer recovery for the observed transient auth connection
+                    // reset; do not change OAuth URLs, cookies or credentials.
+                    val host = request.url.host.orEmpty()
+                    val authHost = host == "api.workos.com" ||
+                        host == "session.fal.ai" || host == "accounts.google.com"
+                    val connectionReset = error.errorCode == WebViewClient.ERROR_CONNECT ||
+                        error.description?.toString()?.contains(
+                            "ERR_CONNECTION_RESET", ignoreCase = true
+                        ) == true
+                    if (authHost && connectionReset) {
+                        view.post { showSignInConnectionError() }
+                    }
+                }
             }
             webChromeClient = WebChromeClient()
         }
@@ -85,7 +112,7 @@ class MainActivity : Activity() {
         } else if (browser.restoreState(savedInstanceState) == null) {
             browser.loadUrl(HOME_URL)
         }
-        showHint("Cursor mode • Hold OK to change mode • Hold Back for menu")
+        showHint("Cursor mode • Hold OK for scroll mode • Hold Back for menu")
     }
 
     private fun isFalUrl(url: String?): Boolean {
@@ -112,7 +139,8 @@ class MainActivity : Activity() {
     private fun syncRemoteOverlay(url: String?) {
         if (!::cursor.isInitialized) return
         cursor.visibility =
-            if (isFalUiPage(url) && mode == Mode.CURSOR) View.VISIBLE else View.GONE
+            if (isFalUiPage(url) && mode != Mode.FOCUS) View.VISIBLE else View.GONE
+        cursor.scrollMode = mode == Mode.SCROLL
     }
 
     /**
@@ -144,21 +172,42 @@ class MainActivity : Activity() {
         browser.evaluateJavascript(focusScript + ";window.__aitv." + command, null)
     }
 
-    private fun changeMode() {
-        if (mode == Mode.CURSOR) {
-            mode = Mode.FOCUS
-            cursor.visibility = View.GONE
-            focusAction("reset")
-            showHint("Focus mode • Arrows highlight webpage controls • Hold OK to change mode")
-        } else {
-            mode = Mode.CURSOR
-            focusAction("reset")
-            cursor.visibility = View.VISIBLE
-            cursor.center()
-            showHint("Cursor mode • Arrows move pointer • OK clicks")
-        }
+    private fun setMode(next: Mode) {
+        if (next == mode) return
+        if (mode == Mode.FOCUS) focusAction("reset")
+        mode = next
+        if (next == Mode.FOCUS) focusAction("reset")
         syncRemoteOverlay(browser.url)
+        val hint = when (next) {
+            Mode.CURSOR -> "Cursor: arrows move pointer, OK clicks • Hold OK for Scroll"
+            Mode.SCROLL -> "Scroll: Up/Down move page, Left/Right move sideways • OK returns to Cursor"
+            Mode.FOCUS -> "Focus: arrows highlight controls, OK activates • Hold OK for Cursor"
+        }
+        showHint(hint)
         browser.requestFocus()
+    }
+
+    // Normal remotes have no wheel: holding OK cycles Cursor -> Scroll -> Focus.
+    private fun changeMode() {
+        val next = when (mode) {
+            Mode.CURSOR -> Mode.SCROLL
+            Mode.SCROLL -> Mode.FOCUS
+            Mode.FOCUS -> Mode.CURSOR
+        }
+        setMode(next)
+    }
+
+    /** Scroll a page or scrollable nested panel underneath the pointer. */
+    private fun scrollSite(direction: String, repeatCount: Int) {
+        if (!isFalUiPage(browser.url) || browser.width <= 0 || browser.height <= 0) return
+        if (direction !in setOf("left", "right", "up", "down")) return
+        val x = (cursor.cursorX / browser.width.toFloat()).coerceIn(0f, 1f)
+        val y = (cursor.cursorY / browser.height.toFloat()).coerceIn(0f, 1f)
+        val distance = (170 + (repeatCount.coerceIn(0, 8) * 20))
+        browser.evaluateJavascript(
+            scrollScript + ";window.__aiTvScroll('$direction',$distance,$x,$y);",
+            null
+        )
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -203,15 +252,19 @@ class MainActivity : Activity() {
                 }
             } else if (event.action == KeyEvent.ACTION_UP) {
                 if (!selectLongHandled && !event.isCanceled) {
-                    if (mode == Mode.CURSOR) {
-                        val at = android.os.SystemClock.uptimeMillis()
-                        val down = MotionEvent.obtain(at, at, MotionEvent.ACTION_DOWN, cursor.cursorX, cursor.cursorY, 0)
-                        val up = MotionEvent.obtain(at, at + 60, MotionEvent.ACTION_UP, cursor.cursorX, cursor.cursorY, 0)
-                        browser.dispatchTouchEvent(down)
-                        browser.dispatchTouchEvent(up)
-                        down.recycle()
-                        up.recycle()
-                    } else focusAction("activate")
+                    when (mode) {
+                        Mode.CURSOR -> {
+                            val at = android.os.SystemClock.uptimeMillis()
+                            val down = MotionEvent.obtain(at, at, MotionEvent.ACTION_DOWN, cursor.cursorX, cursor.cursorY, 0)
+                            val up = MotionEvent.obtain(at, at + 60, MotionEvent.ACTION_UP, cursor.cursorX, cursor.cursorY, 0)
+                            browser.dispatchTouchEvent(down)
+                            browser.dispatchTouchEvent(up)
+                            down.recycle()
+                            up.recycle()
+                        }
+                        Mode.SCROLL -> setMode(Mode.CURSOR)
+                        Mode.FOCUS -> focusAction("activate")
+                    }
                 }
                 selectLongHandled = false
             }
@@ -227,22 +280,28 @@ class MainActivity : Activity() {
                 else -> null
             }
             if (direction != null) {
-                if (mode == Mode.FOCUS) {
-                    focusAction(direction)
-                } else {
-                    val step = resources.displayMetrics.density *
-                        (24f * (1 + (event.repeatCount / 5).coerceAtMost(3)))
-                    val atEdge = when (direction) {
-                        "left" -> cursor.move(-step, 0f)
-                        "right" -> cursor.move(step, 0f)
-                        "up" -> cursor.move(0f, -step)
-                        else -> cursor.move(0f, step)
-                    }
-                    if (atEdge) {
-                        val scroll = resources.displayMetrics.density * 100f
-                        when (direction) {
-                            "up" -> browser.scrollBy(0, -scroll.toInt())
-                            "down" -> browser.scrollBy(0, scroll.toInt())
+                when (mode) {
+                    Mode.FOCUS -> focusAction(direction)
+                    Mode.SCROLL -> scrollSite(direction, event.repeatCount)
+                    Mode.CURSOR -> {
+                        // Holding Up/Down scrolls without requiring the pointer
+                        // to travel all the way to the edge of the TV screen.
+                        if ((direction == "up" || direction == "down") &&
+                            event.repeatCount >= 5
+                        ) {
+                            scrollSite(direction, event.repeatCount)
+                        } else {
+                            val step = resources.displayMetrics.density *
+                                (24f * (1 + (event.repeatCount / 5).coerceAtMost(3)))
+                            val atEdge = when (direction) {
+                                "left" -> cursor.move(-step, 0f)
+                                "right" -> cursor.move(step, 0f)
+                                "up" -> cursor.move(0f, -step)
+                                else -> cursor.move(0f, step)
+                            }
+                            if (atEdge && (direction == "up" || direction == "down")) {
+                                scrollSite(direction, event.repeatCount)
+                            }
                         }
                     }
                 }
@@ -250,6 +309,23 @@ class MainActivity : Activity() {
             }
         }
         return super.dispatchKeyEvent(event)
+    }
+
+    private fun showSignInConnectionError() {
+        if (signInErrorDialogOpen || isFinishing || isDestroyed) return
+        signInErrorDialogOpen = true
+        AlertDialog.Builder(this)
+            .setTitle("Sign-in connection interrupted")
+            .setMessage(
+                "The authentication service reset the connection. " +
+                "You can retry this page or return to fal.ai and start a fresh sign-in. " +
+                "Your saved app data will not be cleared."
+            )
+            .setPositiveButton("Retry page") { _, _ -> browser.reload() }
+            .setNeutralButton("fal.ai Home") { _, _ -> browser.loadUrl(HOME_URL) }
+            .setNegativeButton("Stay here", null)
+            .setOnDismissListener { signInErrorDialogOpen = false }
+            .show()
     }
 
     private fun showHint(text: String) {
@@ -262,7 +338,9 @@ class MainActivity : Activity() {
             "Forward",
             "Refresh",
             "fal.ai home",
-            if (mode == Mode.CURSOR) "Switch to focus mode" else "Switch to cursor mode",
+            "Cursor navigation" + if (mode == Mode.CURSOR) " (active)" else "",
+            "Scroll navigation" + if (mode == Mode.SCROLL) " (active)" else "",
+            "Focus navigation" + if (mode == Mode.FOCUS) " (active)" else "",
             "Close menu"
         )
         AlertDialog.Builder(this)
@@ -273,7 +351,9 @@ class MainActivity : Activity() {
                     1 -> if (browser.canGoForward()) browser.goForward()
                     2 -> browser.reload()
                     3 -> browser.loadUrl(HOME_URL)
-                    4 -> changeMode()
+                    4 -> setMode(Mode.CURSOR)
+                    5 -> setMode(Mode.SCROLL)
+                    6 -> setMode(Mode.FOCUS)
                 }
             }
             .setNegativeButton("Close", null)

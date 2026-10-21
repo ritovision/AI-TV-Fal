@@ -11,14 +11,14 @@ Private-use Kotlin Android TV / Google TV application shell for [fal.ai](https:/
 ## Scope
 
 - Embedded fal.ai website, JavaScript/DOM storage and persistent WebView cookies.
-- Remote-driven experience: spatial focus mode and mouse-like cursor mode (planned).
+- Remote-driven experience: spatial focus mode, mouse-like cursor, and dedicated Scroll mode (new candidate built; headed-device acceptance pending).
 - Native TV keyboard for text fields. Voice dictation is **deferred** until the rest is proven on TV.
-- Navigation controls: Back, Forward, Reload, Home (initial starter: remote Menu button).
+- Navigation controls: Back, Forward, Refresh, Home and three modes through a D-pad-accessible menu (hold Back).
 - No file import/export handling for v1.
 
 ## Status
 
-A **smoke-tested** Kotlin Android TV APK builds, installs, and renders fal.ai in the headed Google TV emulator. Cursor movement, changing to focus mode, DOM element focus, and a remotely accessible navigation menu have been observed. **Google OAuth and persistent fal sessions, actual webpage click behavior, keyboard input, and Sony hardware compatibility remain unverified.** See [docs/QA_2026-10-21.md](docs/QA_2026-10-21.md) and [docs/PRODUCT_AND_QA.md](docs/PRODUCT_AND_QA.md).
+A **smoke-tested** Kotlin Android TV APK builds, installs, and renders fal.ai in the headed Google TV emulator. Cursor movement, focus mode, and a remote-accessible navigation menu have been observed. A newer **scroll-mode and sign-in-retry candidate** is compiled and unit-tested but deliberately not yet installed because an interactive Google login is underway. **Complete OAuth, persistent fal sessions, scroll behavior on device, and Sony hardware compatibility remain unverified.** See [docs/QA_2026-10-21.md](docs/QA_2026-10-21.md), [docs/PRODUCT_AND_QA.md](docs/PRODUCT_AND_QA.md), and [docs/SCROLL_AND_AUTH_2026-10-21.md](docs/SCROLL_AND_AUTH_2026-10-21.md).
 
 ## Toolchain
 
@@ -29,7 +29,7 @@ A **smoke-tested** Kotlin Android TV APK builds, installs, and renders fal.ai in
 
 ## Emulator
 
-The official `system-images;android-36;google-tv;x86_64` image was relocated to disposable storage on **E:** and exposed to the existing Windows Android SDK through a junction. The dedicated `AI_TV_GoogleTV_API36` AVD is registered with its writable data on E: as well. Configuration was validated; **the emulator has not been booted yet**. Windows C: recovered about 8.2 GiB. Other phone emulators and the shared emulator executable on C: were left untouched.
+The official `system-images;android-36;google-tv;x86_64` image was relocated to disposable storage on **E:** and exposed to the existing Windows Android SDK through a junction. The dedicated `AI_TV_GoogleTV_API36` AVD is registered with its writable data on E: as well. The emulator has booted successfully in a headed Windows window, and the initial APK was installed and launched. Windows C: recovered about 8.2 GiB. Other phone emulators and the shared emulator executable on C: were left untouched.
 
 **Warning:** E: can disconnect spontaneously. The recovery scripts, reproducible AVD configuration, and verified image hashes are saved in this Git repository on C:. Executable copies of the scripts are in `C:\Users\Mattj\.android\ai-tv-tools`. See [docs/EMULATOR_RECOVERY.md](docs/EMULATOR_RECOVERY.md) for starting, resetting or rebuilding the disposable AVD, and switching storage drives.
 
