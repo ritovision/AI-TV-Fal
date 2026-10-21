@@ -2,7 +2,9 @@ package com.ritovision.aitv
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
@@ -14,6 +16,7 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.inputmethod.InputMethodManager
 import android.webkit.CookieManager
+import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -38,6 +41,7 @@ class MainActivity : Activity() {
     private var backLongHandled = false
     private var backConsumedForKeyboard = false
     private var signInErrorDialogOpen = false
+    private var pendingMicRequest: PermissionRequest? = null
     private val scrollScript: String by lazy {
         assets.open("tv-scroll.js").bufferedReader().use { it.readText() }
     }
@@ -115,7 +119,17 @@ class MainActivity : Activity() {
                     }
                 }
             }
-            webChromeClient = WebChromeClient()
+            webChromeClient = object : WebChromeClient() {
+                override fun onPermissionRequest(request: PermissionRequest) {
+                    runOnUiThread { handleWebMicrophoneRequest(request) }
+                }
+
+                override fun onPermissionRequestCanceled(request: PermissionRequest) {
+                    runOnUiThread {
+                        if (pendingMicRequest === request) pendingMicRequest = null
+                    }
+                }
+            }
         }
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
@@ -209,6 +223,73 @@ class MainActivity : Activity() {
         if (!isFalUrl(url)) return false
         val host = android.net.Uri.parse(url).host ?: return false
         return host != "session.fal.ai" && host != "auth.fal.ai"
+    }
+
+    /**
+     * A WebView audio request is distinct from Android's RECORD_AUDIO permission.
+     * Only the signed-in HTTPS fal UI may initiate recording, and only the
+     * AUDIO_CAPTURE resource is ever granted. Do not use grant(request.resources):
+     * future WebView versions may add resources we have not approved.
+     */
+    private fun trustedMicOrigin(request: PermissionRequest): Boolean {
+        val origin = request.origin
+        val host = origin.host?.lowercase() ?: return false
+        val approvedHost = host == "fal.ai" ||
+            host == "www.fal.ai" || host == "agent.fal.ai"
+        return origin.scheme.equals("https", ignoreCase = true) &&
+            (origin.port == -1 || origin.port == 443) &&
+            approvedHost && isFalUiPage(browser.url)
+    }
+
+    private fun handleWebMicrophoneRequest(request: PermissionRequest) {
+        if (isFinishing || isDestroyed ||
+            !trustedMicOrigin(request) ||
+            PermissionRequest.RESOURCE_AUDIO_CAPTURE !in request.resources
+        ) {
+            request.deny()
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            request.grant(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+            return
+        }
+        // Android must explicitly approve the device microphone first.
+        // Allow only one pending request and do not persist any permission
+        // in the app or automatically start recording.
+        if (pendingMicRequest != null) {
+            request.deny()
+            return
+        }
+        pendingMicRequest = request
+        requestPermissions(
+            arrayOf(Manifest.permission.RECORD_AUDIO),
+            REQUEST_MICROPHONE_PERMISSION
+        )
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_MICROPHONE_PERMISSION) return
+        val request = pendingMicRequest ?: return
+        pendingMicRequest = null
+        val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED &&
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
+        if (granted && !isFinishing && !isDestroyed && trustedMicOrigin(request)) {
+            request.grant(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+        } else {
+            request.deny()
+            if (!isFinishing && !isDestroyed) {
+                Toast.makeText(this, "Microphone access unavailable", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
     private fun syncRemoteOverlay(url: String?, keyboardShowing: Boolean = isImeVisible()) {
@@ -536,11 +617,14 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        pendingMicRequest?.deny()
+        pendingMicRequest = null
         browser.destroy()
         super.onDestroy()
     }
 
     companion object {
         private const val HOME_URL = "https://fal.ai/"
+        private const val REQUEST_MICROPHONE_PERMISSION = 5307
     }
 }
