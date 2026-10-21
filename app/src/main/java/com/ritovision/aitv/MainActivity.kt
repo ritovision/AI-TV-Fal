@@ -2,13 +2,16 @@ package com.ritovision.aitv
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Context
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.InputDevice
 import android.view.View
 import android.view.WindowInsets
+import android.view.inputmethod.InputMethodManager
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
@@ -30,12 +33,16 @@ class MainActivity : Activity() {
     private lateinit var cursor: CursorOverlay
     private var selectLongHandled = false
     private var backLongHandled = false
+    private var backConsumedForKeyboard = false
     private var signInErrorDialogOpen = false
     private val scrollScript: String by lazy {
         assets.open("tv-scroll.js").bufferedReader().use { it.readText() }
     }
     private val focusScript: String by lazy {
         assets.open("tv-focus.js").bufferedReader().use { it.readText() }
+    }
+    private val inputAssistScript: String by lazy {
+        assets.open("tv-input-assist.js").bufferedReader().use { it.readText() }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -46,7 +53,20 @@ class MainActivity : Activity() {
                 View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
                 View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
 
-        browser = WebView(this).apply {
+        browser = object : WebView(this) {
+            override fun onTouchEvent(event: MotionEvent): Boolean {
+                val handled = super.onTouchEvent(event)
+                if (event.actionMasked == MotionEvent.ACTION_UP && isFalUiPage(url)) {
+                    val x = event.x
+                    val y = event.y
+                    // Rich-text editors may focus without triggering the TV keyboard.
+                    // Check the clicked DOM element, not just the auto-focused field,
+                    // to avoid reopening the keyboard when selecting model menus.
+                    postDelayed({ showKeyboardIfEditorTapped(x, y) }, 120L)
+                }
+                return handled
+            }
+        }.apply {
             isFocusable = true
             isFocusableInTouchMode = true
             settings.apply {
@@ -65,8 +85,9 @@ class MainActivity : Activity() {
 
                 override fun onPageFinished(view: WebView, url: String) {
                     syncRemoteOverlay(url)
-                    if (mode == Mode.FOCUS && isFalUiPage(url)) {
-                        view.evaluateJavascript(focusScript, null)
+                    if (isFalUiPage(url)) {
+                        view.evaluateJavascript(inputAssistScript, null)
+                        if (mode == Mode.FOCUS) view.evaluateJavascript(focusScript, null)
                     }
                 }
 
@@ -148,14 +169,76 @@ class MainActivity : Activity() {
      * hand key events to Android instead of stealing Enter / DPAD keys.
      */
     private fun isImeVisible(): Boolean {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val insets = window.decorView.rootWindowInsets
-            if (insets != null) return insets.isVisible(WindowInsets.Type.ime())
-        }
+        val insetsShown = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.decorView.rootWindowInsets?.isVisible(WindowInsets.Type.ime()) == true
+        } else false
         val visible = Rect()
         window.decorView.getWindowVisibleDisplayFrame(visible)
         val height = window.decorView.rootView.height
-        return height > 0 && height - visible.bottom > height * 0.18f
+        val resizedByIme = height > 0 && height - visible.bottom > height * 0.18f
+        return insetsShown || resizedByIme
+    }
+
+    /** One Back press dismisses the IME without navigating the browser or closing a popup. */
+    private fun hideKeyboardIfVisible(): Boolean {
+        if (!isImeVisible()) return false
+        val keyboard = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        keyboard.hideSoftInputFromWindow(browser.windowToken, 0)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.hide(WindowInsets.Type.ime())
+        }
+        return true
+    }
+
+    /**
+     * fal's ProseMirror-style prompt editor is contenteditable, rather than a
+     * normal input. On Google TV it can gain DOM focus without opening LatinIME.
+     * Request the native IME only when the user actually tapped an editable
+     * element. An auto-focused model-picker search field must NOT trigger this.
+     */
+    private fun showKeyboardIfEditorTapped(touchX: Float, touchY: Float) {
+        if (!isFalUiPage(browser.url) || browser.width <= 0 || browser.height <= 0) return
+        val relativeX = (touchX / browser.width.toFloat()).coerceIn(0f, 1f)
+        val relativeY = (touchY / browser.height.toFloat()).coerceIn(0f, 1f)
+        val probe = """
+            (function () {
+                const tappedEditable = window.__aiTvTappedEditable === true;
+                window.__aiTvTappedEditable = false;
+                const el = document.elementFromPoint(
+                    Math.min(innerWidth - 1, innerWidth * $relativeX),
+                    Math.min(innerHeight - 1, innerHeight * $relativeY)
+                );
+                const editor = el && el.closest(
+                    'textarea,input[type="text"],input[type="search"],' +
+                    '[contenteditable]:not([contenteditable="false"])'
+                );
+                const active = document.activeElement;
+                return Boolean(tappedEditable && editor && active &&
+                    (editor === active || editor.contains(active) || active.contains(editor)));
+            })()
+        """.trimIndent()
+        browser.evaluateJavascript(probe) { value ->
+            if (value != "true" || !isFalUiPage(browser.url) || isImeVisible()) return@evaluateJavascript
+            browser.post {
+                if (isFinishing || isDestroyed || !isFalUiPage(browser.url)) return@post
+                browser.requestFocus()
+                val keyboard = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                keyboard.showSoftInput(browser, InputMethodManager.SHOW_IMPLICIT)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    window.insetsController?.show(WindowInsets.Type.ime())
+                }
+                // Some TV IMEs ignore SHOW_IMPLICIT with a physical keyboard
+                // advertised by the virtual device. This fallback follows only
+                // an explicit tap on an editor, never passive auto-focus.
+                browser.postDelayed({
+                    if (!isFinishing && !isDestroyed && !isImeVisible() &&
+                        isFalUiPage(browser.url)
+                    ) {
+                        keyboard.showSoftInput(browser, InputMethodManager.SHOW_FORCED)
+                    }
+                }, 320L)
+            }
+        }
     }
 
     private fun focusAction(action: String) {
@@ -211,8 +294,19 @@ class MainActivity : Activity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        // Never handle the on-screen TV keyboard's arrows, OK/Enter, or Back.
-        // Its action button must reach the focused text editor unmodified.
+        val backKey = event.keyCode == KeyEvent.KEYCODE_BACK ||
+            event.keyCode == KeyEvent.KEYCODE_ESCAPE
+        if (backKey && (isImeVisible() || backConsumedForKeyboard)) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                backConsumedForKeyboard = true
+                hideKeyboardIfVisible()
+            } else if (event.action == KeyEvent.ACTION_UP) {
+                backConsumedForKeyboard = false
+            }
+            return true
+        }
+
+        // Let the software keyboard own arrow navigation and key activation.
         if (isImeVisible()) return super.dispatchKeyEvent(event)
 
         if (event.keyCode == KeyEvent.KEYCODE_MENU) {
@@ -257,6 +351,8 @@ class MainActivity : Activity() {
                             val at = android.os.SystemClock.uptimeMillis()
                             val down = MotionEvent.obtain(at, at, MotionEvent.ACTION_DOWN, cursor.cursorX, cursor.cursorY, 0)
                             val up = MotionEvent.obtain(at, at + 60, MotionEvent.ACTION_UP, cursor.cursorX, cursor.cursorY, 0)
+                            down.source = InputDevice.SOURCE_TOUCHSCREEN
+                            up.source = InputDevice.SOURCE_TOUCHSCREEN
                             browser.dispatchTouchEvent(down)
                             browser.dispatchTouchEvent(up)
                             down.recycle()
@@ -360,7 +456,9 @@ class MainActivity : Activity() {
             .show()
     }
 
+    @Suppress("DEPRECATION")
     override fun onBackPressed() {
+        if (hideKeyboardIfVisible()) return
         if (browser.canGoBack()) browser.goBack() else showBrowserMenu()
     }
 
