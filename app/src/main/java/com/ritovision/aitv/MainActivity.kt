@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.InputDevice
+import android.view.Gravity
 import android.view.View
 import android.view.WindowInsets
 import android.view.inputmethod.InputMethodManager
@@ -19,6 +20,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceError
+import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.Toast
 
@@ -31,6 +33,7 @@ class MainActivity : Activity() {
     private var mode = Mode.CURSOR
     private lateinit var browser: WebView
     private lateinit var cursor: CursorOverlay
+    private lateinit var keyboardDismissButton: Button
     private var selectLongHandled = false
     private var backLongHandled = false
     private var backConsumedForKeyboard = false
@@ -121,6 +124,12 @@ class MainActivity : Activity() {
         if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
 
         cursor = CursorOverlay(this)
+        keyboardDismissButton = Button(this).apply {
+            text = "Hide keyboard"
+            isAllCaps = false
+            visibility = View.GONE
+            setOnClickListener { hideKeyboardUnconditionally() }
+        }
         val frame = object : FrameLayout(this) {
             override fun dispatchHoverEvent(event: MotionEvent): Boolean {
                 if (event.isFromSource(InputDevice.SOURCE_MOUSE) &&
@@ -145,6 +154,17 @@ class MainActivity : Activity() {
         }
         frame.addView(browser, FrameLayout.LayoutParams(-1, -1))
         frame.addView(cursor, FrameLayout.LayoutParams(-1, -1))
+        // Always offer a clickable escape hatch above the OS keyboard on TV.
+        // This is especially useful when an emulator's Esc key is not mapped.
+        val inset = (16f * resources.displayMetrics.density).toInt()
+        frame.addView(keyboardDismissButton, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.END
+        ).apply {
+            topMargin = (84f * resources.displayMetrics.density).toInt()
+            marginEnd = inset
+        })
         // The custom pointer is useless and distracting over the TV keyboard.
         // Use actual IME insets (not just page navigation) to update visibility.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -199,6 +219,12 @@ class MainActivity : Activity() {
             View.GONE
         }
         cursor.scrollMode = mode == Mode.SCROLL
+        if (::keyboardDismissButton.isInitialized) {
+            val visibility = if (keyboardShowing) View.VISIBLE else View.GONE
+            if (keyboardDismissButton.visibility != visibility) {
+                keyboardDismissButton.visibility = visibility
+            }
+        }
     }
 
     /**
@@ -216,14 +242,20 @@ class MainActivity : Activity() {
         return insetsShown || resizedByIme
     }
 
-    /** One Back press dismisses the IME without navigating the browser or closing a popup. */
-    private fun hideKeyboardIfVisible(): Boolean {
-        if (!isImeVisible()) return false
+    /** Hide the IME without clearing input text, browser history or the active popup. */
+    private fun hideKeyboardUnconditionally() {
         val keyboard = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
         keyboard.hideSoftInputFromWindow(browser.windowToken, 0)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             window.insetsController?.hide(WindowInsets.Type.ime())
         }
+        browser.postDelayed({ syncRemoteOverlay(browser.url) }, 180L)
+    }
+
+    /** One Back press dismisses the IME without navigating the browser or closing a popup. */
+    private fun hideKeyboardIfVisible(): Boolean {
+        if (!isImeVisible()) return false
+        hideKeyboardUnconditionally()
         return true
     }
 
@@ -264,16 +296,10 @@ class MainActivity : Activity() {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     window.insetsController?.show(WindowInsets.Type.ime())
                 }
-                // Some TV IMEs ignore SHOW_IMPLICIT with a physical keyboard
-                // advertised by the virtual device. This fallback follows only
-                // an explicit tap on an editor, never passive auto-focus.
-                browser.postDelayed({
-                    if (!isFinishing && !isDestroyed && !isImeVisible() &&
-                        isFalUiPage(browser.url)
-                    ) {
-                        keyboard.showSoftInput(browser, InputMethodManager.SHOW_FORCED)
-                    }
-                }, 320L)
+                // Never use SHOW_FORCED: a forced IME can outlive its editor
+                // and reappear after Back, especially on TV keyboard services.
+                // The initial request and WindowInsets API are sufficient for
+                // the tested Google TV emulator's native keyboard.
             }
         }
     }
