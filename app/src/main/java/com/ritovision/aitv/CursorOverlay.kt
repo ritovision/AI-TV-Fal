@@ -52,12 +52,17 @@ class CursorOverlay(context: Context) : View(context) {
         invalidate()
     }
 
+    /** Sync cursor with a physical mouse for emulator tests; remote D-pad still moves it. */
+    fun position(x: Float, y: Float) {
+        cursorX = x.coerceIn(0f, (width - 1).coerceAtLeast(0).toFloat())
+        cursorY = y.coerceIn(0f, (height - 1).coerceAtLeast(0).toFloat())
+        invalidate()
+    }
+
     fun move(dx: Float, dy: Float): Boolean {
         val px = cursorX
         val py = cursorY
-        cursorX = (cursorX + dx).coerceIn(0f, (width - 1).coerceAtLeast(0).toFloat())
-        cursorY = (cursorY + dy).coerceIn(0f, (height - 1).coerceAtLeast(0).toFloat())
-        invalidate()
+        position(cursorX + dx, cursorY + dy)
         return px == cursorX && py == cursorY
     }
 

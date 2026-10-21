@@ -121,9 +121,43 @@ class MainActivity : Activity() {
         if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
 
         cursor = CursorOverlay(this)
-        val frame = FrameLayout(this)
+        val frame = object : FrameLayout(this) {
+            override fun dispatchHoverEvent(event: MotionEvent): Boolean {
+                if (event.isFromSource(InputDevice.SOURCE_MOUSE) &&
+                    event.actionMasked == MotionEvent.ACTION_HOVER_MOVE &&
+                    mode != Mode.FOCUS && !isImeVisible() && isFalUiPage(browser.url)
+                ) {
+                    cursor.position(event.x, event.y)
+                }
+                return super.dispatchHoverEvent(event)
+            }
+
+            override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+                // Mouse clicks in the emulator should update the same cursor
+                // the remote controls, rather than leaving it stuck at center.
+                if (event.actionMasked == MotionEvent.ACTION_DOWN &&
+                    mode != Mode.FOCUS && isFalUiPage(browser.url)
+                ) {
+                    cursor.position(event.x, event.y)
+                }
+                return super.dispatchTouchEvent(event)
+            }
+        }
         frame.addView(browser, FrameLayout.LayoutParams(-1, -1))
         frame.addView(cursor, FrameLayout.LayoutParams(-1, -1))
+        // The custom pointer is useless and distracting over the TV keyboard.
+        // Use actual IME insets (not just page navigation) to update visibility.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            frame.setOnApplyWindowInsetsListener { _, insets ->
+                syncRemoteOverlay(browser.url, insets.isVisible(WindowInsets.Type.ime()))
+                insets
+            }
+        }
+        frame.viewTreeObserver.addOnGlobalLayoutListener {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                syncRemoteOverlay(browser.url)
+            }
+        }
         setContentView(frame)
         cursor.post { cursor.center() }
         browser.requestFocus()
@@ -157,10 +191,13 @@ class MainActivity : Activity() {
         return host != "session.fal.ai" && host != "auth.fal.ai"
     }
 
-    private fun syncRemoteOverlay(url: String?) {
+    private fun syncRemoteOverlay(url: String?, keyboardShowing: Boolean = isImeVisible()) {
         if (!::cursor.isInitialized) return
-        cursor.visibility =
-            if (isFalUiPage(url) && mode != Mode.FOCUS) View.VISIBLE else View.GONE
+        cursor.visibility = if (isFalUiPage(url) && mode != Mode.FOCUS && !keyboardShowing) {
+            View.VISIBLE
+        } else {
+            View.GONE
+        }
         cursor.scrollMode = mode == Mode.SCROLL
     }
 
