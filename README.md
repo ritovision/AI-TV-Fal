@@ -29,7 +29,9 @@ Initial **unverified** Android project scaffold with a full-screen WebView and m
 
 ## Emulator
 
-The official `system-images;android-36;google-tv;x86_64` image is installed in the existing **Windows** Android SDK, separate from this repository. We have **not** created an AVD yet because Windows C: has insufficient headroom. AVD creation, boot, build, and installation are deferred until adequate disk space is available.
+The official `system-images;android-36;google-tv;x86_64` image was relocated to disposable storage on **E:** and exposed to the existing Windows Android SDK through a junction. The dedicated `AI_TV_GoogleTV_API36` AVD is registered with its writable data on E: as well. Configuration was validated; **the emulator has not been booted yet**. Windows C: recovered about 8.2 GiB. Other phone emulators and the shared emulator executable on C: were left untouched.
+
+**Warning:** E: can disconnect spontaneously. The recovery scripts, reproducible AVD configuration, and verified image hashes are saved in this Git repository on C:. Executable copies of the scripts are in `C:\Users\Mattj\.android\ai-tv-tools`. See [docs/EMULATOR_RECOVERY.md](docs/EMULATOR_RECOVERY.md) for starting, resetting or rebuilding the disposable AVD, and switching storage drives.
 
 ## Ground rules
 
