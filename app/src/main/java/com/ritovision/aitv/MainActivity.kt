@@ -2,10 +2,13 @@ package com.ritovision.aitv
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.graphics.Rect
+import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowInsets
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
@@ -49,8 +52,14 @@ class MainActivity : Activity() {
                 setSupportMultipleWindows(false)
             }
             webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                    super.onPageStarted(view, url, favicon)
+                    syncRemoteOverlay(url)
+                }
+
                 override fun onPageFinished(view: WebView, url: String) {
-                    if (mode == Mode.FOCUS && isFalUrl(url)) {
+                    syncRemoteOverlay(url)
+                    if (mode == Mode.FOCUS && isFalUiPage(url)) {
                         view.evaluateJavascript(focusScript, null)
                     }
                 }
@@ -89,14 +98,40 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun focusAction(action: String) {
-        if (!isFalUrl(browser.url)) {
-            if (action == "activate") {
-                browser.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
-                browser.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
-            }
-            return
+    /**
+     * Login screens belong to the authentication provider, not fal's editor.
+     * Do not synthesize browser clicks or inject navigation JS into them.
+     * Native keyboard / web focus handling must take precedence there.
+     */
+    private fun isFalUiPage(url: String?): Boolean {
+        if (!isFalUrl(url)) return false
+        val host = android.net.Uri.parse(url).host ?: return false
+        return host != "session.fal.ai" && host != "auth.fal.ai"
+    }
+
+    private fun syncRemoteOverlay(url: String?) {
+        if (!::cursor.isInitialized) return
+        cursor.visibility =
+            if (isFalUiPage(url) && mode == Mode.CURSOR) View.VISIBLE else View.GONE
+    }
+
+    /**
+     * The TV IME is its own interactive window. While it is showing,
+     * hand key events to Android instead of stealing Enter / DPAD keys.
+     */
+    private fun isImeVisible(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val insets = window.decorView.rootWindowInsets
+            if (insets != null) return insets.isVisible(WindowInsets.Type.ime())
         }
+        val visible = Rect()
+        window.decorView.getWindowVisibleDisplayFrame(visible)
+        val height = window.decorView.rootView.height
+        return height > 0 && height - visible.bottom > height * 0.18f
+    }
+
+    private fun focusAction(action: String) {
+        if (!isFalUiPage(browser.url)) return
         val allowed = mapOf(
             "left" to "move('left')",
             "right" to "move('right')",
@@ -122,10 +157,15 @@ class MainActivity : Activity() {
             cursor.center()
             showHint("Cursor mode • Arrows move pointer • OK clicks")
         }
+        syncRemoteOverlay(browser.url)
         browser.requestFocus()
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // Never handle the on-screen TV keyboard's arrows, OK/Enter, or Back.
+        // Its action button must reach the focused text editor unmodified.
+        if (isImeVisible()) return super.dispatchKeyEvent(event)
+
         if (event.keyCode == KeyEvent.KEYCODE_MENU) {
             if (event.action == KeyEvent.ACTION_UP) showBrowserMenu()
             return true
@@ -148,6 +188,10 @@ class MainActivity : Activity() {
             }
             return true
         }
+
+        // On Google / WorkOS / other external login pages, use ordinary
+        // WebView focus and key activation rather than the custom TV cursor.
+        if (!isFalUiPage(browser.url)) return super.dispatchKeyEvent(event)
 
         if (event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
             event.keyCode == KeyEvent.KEYCODE_ENTER
