@@ -26,6 +26,7 @@ import android.webkit.WebResourceError
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.Toast
+import org.json.JSONObject
 
 /**
  * Android TV-only remote navigation wrapper around the fal.ai website.
@@ -41,6 +42,8 @@ class MainActivity : Activity() {
     private var backLongHandled = false
     private var backConsumedForKeyboard = false
     private var signInErrorDialogOpen = false
+    private var tvKeyboardOpen = false
+    private var unsentTvKeyboardDraft = ""
     private var pendingMicRequest: PermissionRequest? = null
     private val scrollScript: String by lazy {
         assets.open("tv-scroll.js").bufferedReader().use { it.readText() }
@@ -69,7 +72,7 @@ class MainActivity : Activity() {
                     // Rich-text editors may focus without triggering the TV keyboard.
                     // Check the clicked DOM element, not just the auto-focused field,
                     // to avoid reopening the keyboard when selecting model menus.
-                    postDelayed({ showKeyboardIfEditorTapped(x, y) }, 120L)
+                    postDelayed({ openTvKeyboardIfComposerTapped(x, y) }, 120L)
                 }
                 return handled
             }
@@ -341,46 +344,93 @@ class MainActivity : Activity() {
     }
 
     /**
-     * fal's ProseMirror-style prompt editor is contenteditable, rather than a
-     * normal input. On Google TV it can gain DOM focus without opening LatinIME.
-     * Request the native IME only when the user actually tapped an editable
-     * element. An auto-focused model-picker search field must NOT trigger this.
+     * Clicking the fal Agent composer normally opens the Android TV IME. On
+     * this Google TV AVD that keyboard is visible but NOT_FOCUSABLE, so DPAD
+     * goes to webpage buttons behind it rather than selecting letters.
+     * Show a native focusable remote keyboard only when the rich editor itself
+     * was tapped; ordinary search fields and login pages are not intercepted.
      */
-    private fun showKeyboardIfEditorTapped(touchX: Float, touchY: Float) {
-        if (!isFalUiPage(browser.url) || browser.width <= 0 || browser.height <= 0) return
-        val relativeX = (touchX / browser.width.toFloat()).coerceIn(0f, 1f)
-        val relativeY = (touchY / browser.height.toFloat()).coerceIn(0f, 1f)
+    private fun openTvKeyboardIfComposerTapped(touchX: Float, touchY: Float) {
+        if (!isFalUiPage(browser.url) || tvKeyboardOpen || browser.width <= 0 || browser.height <= 0) return
+        val x = (touchX / browser.width.toFloat()).coerceIn(0f, 1f)
+        val y = (touchY / browser.height.toFloat()).coerceIn(0f, 1f)
         val probe = """
             (function () {
                 const tappedEditable = window.__aiTvTappedEditable === true;
                 window.__aiTvTappedEditable = false;
                 const el = document.elementFromPoint(
-                    Math.min(innerWidth - 1, innerWidth * $relativeX),
-                    Math.min(innerHeight - 1, innerHeight * $relativeY)
+                    Math.min(innerWidth - 1, innerWidth * $x),
+                    Math.min(innerHeight - 1, innerHeight * $y)
                 );
-                const editor = el && el.closest(
-                    'textarea,input[type="text"],input[type="search"],' +
-                    '[contenteditable]:not([contenteditable="false"])'
-                );
-                const active = document.activeElement;
-                return Boolean(tappedEditable && editor && active &&
-                    (editor === active || editor.contains(active) || active.contains(editor)));
+                return Boolean(tappedEditable && el && el.closest(
+                    'div.tiptap.ProseMirror[contenteditable="true"]'
+                ));
             })()
         """.trimIndent()
         browser.evaluateJavascript(probe) { value ->
-            if (value != "true" || !isFalUiPage(browser.url) || isImeVisible()) return@evaluateJavascript
-            browser.post {
-                if (isFinishing || isDestroyed || !isFalUiPage(browser.url)) return@post
-                browser.requestFocus()
-                val keyboard = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-                keyboard.showSoftInput(browser, InputMethodManager.SHOW_IMPLICIT)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    window.insetsController?.show(WindowInsets.Type.ime())
+            if (value == "true" && isFalUiPage(browser.url) && !tvKeyboardOpen) {
+                showTvRemoteKeyboard()
+            }
+        }
+    }
+
+    /** Optional manual entry point: long-press Back -> Type with TV remote. */
+    private fun showTvRemoteKeyboard() {
+        if (!isFalUiPage(browser.url) || tvKeyboardOpen || isFinishing || isDestroyed) return
+        hideKeyboardUnconditionally()
+        tvKeyboardOpen = true
+        TvRemoteKeyboard(
+            this,
+            unsentTvKeyboardDraft,
+            onInsert = { text ->
+                // Keep an unsent copy if the website changes and insertion fails.
+                unsentTvKeyboardDraft = text
+                browser.postDelayed({ insertTextIntoFalComposer(text) }, 150L)
+            },
+            onDismiss = { tvKeyboardOpen = false }
+        ).show()
+    }
+
+    /**
+     * Use Chromium's real rich-editor input path (execCommand emits input
+     * events, which ProseMirror consumes), not innerHTML mutations or a fake
+     * change event. This inserts text ONLY: it never submits the Agent prompt.
+     * JSONObject.quote prevents typed text from becoming executable JavaScript.
+     */
+    private fun insertTextIntoFalComposer(text: String) {
+        if (!isFalUiPage(browser.url) || isFinishing || isDestroyed || text.isBlank()) return
+        val safelyQuotedText = JSONObject.quote(text)
+        val script = """
+            (function () {
+                if (location.protocol !== 'https:' ||
+                    !(location.hostname === 'fal.ai' || location.hostname.endsWith('.fal.ai'))) {
+                    return false;
                 }
-                // Never use SHOW_FORCED: a forced IME can outlive its editor
-                // and reappear after Back, especially on TV keyboard services.
-                // The initial request and WindowInsets API are sufficient for
-                // the tested Google TV emulator's native keyboard.
+                const editor = document.querySelector(
+                    'div.tiptap.ProseMirror[contenteditable="true"]'
+                );
+                if (!editor || !editor.isContentEditable) return false;
+                editor.focus();
+                const range = document.createRange();
+                range.selectNodeContents(editor);
+                range.collapse(false);
+                const selection = window.getSelection();
+                if (!selection) return false;
+                selection.removeAllRanges();
+                selection.addRange(range);
+                const before = (editor.textContent || '').length;
+                const inserted = document.execCommand('insertText', false, $safelyQuotedText);
+                return Boolean(inserted &&
+                    (editor.textContent || '').length >= before + $safelyQuotedText.length);
+            })()
+        """.trimIndent()
+        browser.requestFocus()
+        browser.evaluateJavascript(script) { succeeded ->
+            if (succeeded == "true") {
+                unsentTvKeyboardDraft = ""
+                showHint("Text inserted into fal. Press Send yourself.")
+            } else if (!isFinishing && !isDestroyed) {
+                showHint("Could not insert text. Open Type with TV remote to retry.")
             }
         }
     }
@@ -577,6 +627,7 @@ class MainActivity : Activity() {
             "Back",
             "Forward",
             "Refresh",
+            "Type with TV remote",
             "fal.ai home",
             "Cursor navigation" + if (mode == Mode.CURSOR) " (active)" else "",
             "Scroll navigation" + if (mode == Mode.SCROLL) " (active)" else "",
@@ -590,10 +641,11 @@ class MainActivity : Activity() {
                     0 -> if (browser.canGoBack()) browser.goBack()
                     1 -> if (browser.canGoForward()) browser.goForward()
                     2 -> browser.reload()
-                    3 -> browser.loadUrl(HOME_URL)
-                    4 -> setMode(Mode.CURSOR)
-                    5 -> setMode(Mode.SCROLL)
-                    6 -> setMode(Mode.FOCUS)
+                    3 -> showTvRemoteKeyboard()
+                    4 -> browser.loadUrl(HOME_URL)
+                    5 -> setMode(Mode.CURSOR)
+                    6 -> setMode(Mode.SCROLL)
+                    7 -> setMode(Mode.FOCUS)
                 }
             }
             .setNegativeButton("Close", null)
